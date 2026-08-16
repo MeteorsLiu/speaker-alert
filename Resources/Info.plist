@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Speaker Alert</string>
+    <key>CFBundleExecutable</key>
+    <string>SpeakerAlert</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.meteorsliu.speaker-alert</string>
+    <key>CFBundleName</key>
+    <string>Speaker Alert</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.2</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>检测 Mac 内建扬声器何时开始播放声音，以显示提醒。</string>
+</dict>
+</plist>

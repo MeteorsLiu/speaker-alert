@@ -1,0 +1,27 @@
+name: Build DMG
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build DMG
+        run: ./scripts/build-dmg.sh
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/Speaker-Alert.dmg
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          overwrite_files: true
