@@ -13,6 +13,7 @@ APP_DIR="$BUILD_DIR/Speaker Alert.app"
 /usr/bin/xcrun swiftc \
     -warnings-as-errors \
     -O \
+    -framework Accelerate \
     -framework CoreAudio \
     "$ROOT_DIR/Sources/SpeakerAlert/main.swift" \
     -o "$APP_DIR/Contents/MacOS/SpeakerAlert"

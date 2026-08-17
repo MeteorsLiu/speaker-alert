@@ -1,11 +1,89 @@
+import Accelerate
 import CoreAudio
 import Foundation
 
 private final class SpeakerAlert {
-    private let notificationQueue = DispatchQueue(label: "io.github.meteorsliu.speaker-alert.notification")
+    private let stateQueue = DispatchQueue(label: "io.github.meteorsliu.speaker-alert.state")
+    private var speakerDevice = AudioDeviceID(kAudioObjectUnknown)
+    private var bytesPerFrame = UInt32(0)
+    private var silenceFrameThreshold = UInt64(0)
+    private var silentFrameCount = UInt64(0)
+    private var tapHasSignal = false
+    private var hasSignal = false
+    private var isMuted = false
+    private var volume: Float32 = 0
     private var wasAudible = false
 
+    private var muteAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyMute,
+        mScope: kAudioDevicePropertyScopeOutput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    private var volumeAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyVolumeScalar,
+        mScope: kAudioDevicePropertyScopeOutput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    private lazy var outputControlListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        self?.refreshOutputControls()
+    }
+
     func run() {
+        var translateAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var speakerUID = "BuiltInSpeakerDevice" as CFString
+        var device = AudioDeviceID(kAudioObjectUnknown)
+        var deviceSize = UInt32(MemoryLayout.size(ofValue: device))
+        let translateStatus = withUnsafePointer(to: &speakerUID) { uidPointer in
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &translateAddress,
+                UInt32(MemoryLayout<CFString>.size),
+                uidPointer,
+                &deviceSize,
+                &device
+            )
+        }
+        guard translateStatus == noErr, device != kAudioObjectUnknown else {
+            fputs("speaker-alert: cannot find the built-in speaker (OSStatus \(translateStatus))\n", stderr)
+            exit(1)
+        }
+        speakerDevice = device
+
+        guard stateQueue.sync(execute: refreshOutputControls) else {
+            exit(1)
+        }
+        let muteListenerStatus = AudioObjectAddPropertyListenerBlock(
+            device,
+            &muteAddress,
+            stateQueue,
+            outputControlListener
+        )
+        guard muteListenerStatus == noErr else {
+            fputs("speaker-alert: cannot monitor speaker mute (OSStatus \(muteListenerStatus))\n", stderr)
+            exit(1)
+        }
+        let volumeListenerStatus = AudioObjectAddPropertyListenerBlock(
+            device,
+            &volumeAddress,
+            stateQueue,
+            outputControlListener
+        )
+        guard volumeListenerStatus == noErr else {
+            AudioObjectRemovePropertyListenerBlock(
+                device,
+                &muteAddress,
+                stateQueue,
+                outputControlListener
+            )
+            fputs("speaker-alert: cannot monitor speaker volume (OSStatus \(volumeListenerStatus))\n", stderr)
+            exit(1)
+        }
+
         let tapDescription = CATapDescription(
             excludingProcesses: [],
             deviceUID: "BuiltInSpeakerDevice",
@@ -46,6 +124,8 @@ private final class SpeakerAlert {
             fputs("speaker-alert: built-in speaker tap is not Float32 PCM\n", stderr)
             exit(1)
         }
+        bytesPerFrame = format.mBytesPerFrame
+        silenceFrameThreshold = UInt64(format.mSampleRate / 4)
 
         let aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Speaker Alert",
@@ -96,7 +176,8 @@ private final class SpeakerAlert {
     }
 
     private func handleAudio(_ inputData: UnsafePointer<AudioBufferList>) {
-        var isAudible = false
+        var bufferHasSignal = false
+        var bufferFrameCount = UInt32(0)
         let buffers = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inputData)
         )
@@ -106,24 +187,90 @@ private final class SpeakerAlert {
             }
             let samples = data.assumingMemoryBound(to: Float.self)
             let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-            for index in 0..<sampleCount where samples[index] != 0 {
-                isAudible = true
-                break
+            bufferFrameCount = max(bufferFrameCount, buffer.mDataByteSize / bytesPerFrame)
+            if sampleCount > 0 {
+                var maximumMagnitude: Float = 0
+                vDSP_maxmgv(samples, 1, &maximumMagnitude, vDSP_Length(sampleCount))
+                bufferHasSignal = maximumMagnitude > 0
             }
-            if isAudible {
+            if bufferHasSignal {
                 break
             }
         }
 
-        if isAudible {
-            if !wasAudible {
-                wasAudible = true
-                notificationQueue.async { [weak self] in
-                    self?.notify()
-                }
+        if bufferHasSignal {
+            silentFrameCount = 0
+            guard !tapHasSignal else {
+                return
             }
+            tapHasSignal = true
         } else {
-            wasAudible = false
+            guard tapHasSignal else {
+                return
+            }
+            silentFrameCount += UInt64(bufferFrameCount)
+            guard silentFrameCount >= silenceFrameThreshold else {
+                return
+            }
+            silentFrameCount = 0
+            tapHasSignal = false
+        }
+
+        let hasSignal = tapHasSignal
+        stateQueue.async { [weak self] in
+            self?.hasSignal = hasSignal
+            self?.updateAudibility()
+        }
+    }
+
+    @discardableResult
+    private func refreshOutputControls() -> Bool {
+        var mute: UInt32 = 0
+        var muteSize = UInt32(MemoryLayout.size(ofValue: mute))
+        var muteProperty = muteAddress
+        let muteStatus = AudioObjectGetPropertyData(
+            speakerDevice,
+            &muteProperty,
+            0,
+            nil,
+            &muteSize,
+            &mute
+        )
+
+        var currentVolume: Float32 = 0
+        var volumeSize = UInt32(MemoryLayout.size(ofValue: currentVolume))
+        var volumeProperty = volumeAddress
+        let volumeStatus = AudioObjectGetPropertyData(
+            speakerDevice,
+            &volumeProperty,
+            0,
+            nil,
+            &volumeSize,
+            &currentVolume
+        )
+        guard muteStatus == noErr, volumeStatus == noErr else {
+            fputs(
+                "speaker-alert: cannot read speaker controls " +
+                "(mute OSStatus \(muteStatus), volume OSStatus \(volumeStatus))\n",
+                stderr
+            )
+            return false
+        }
+
+        isMuted = mute != 0
+        volume = currentVolume
+        updateAudibility()
+        return true
+    }
+
+    private func updateAudibility() {
+        let isAudible = hasSignal && !isMuted && volume > 0
+        guard isAudible != wasAudible else {
+            return
+        }
+        wasAudible = isAudible
+        if isAudible {
+            notify()
         }
     }
 

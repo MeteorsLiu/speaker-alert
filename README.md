@@ -2,7 +2,10 @@
 
 Speaker Alert monitors the actual audio samples sent to the Mac built-in
 speaker. It displays a notification when the signal changes from digital
-silence to non-silence.
+silence to non-silence and the built-in speaker is neither muted nor set to
+zero volume. Raising the volume or unmuting during playback also triggers the
+notification. All-zero gaps shorter than 250 milliseconds do not reset the
+playback state.
 
 It ignores headphones, USB audio devices, and other output devices. Audio
 buffers are inspected locally and are never copied, recorded, or saved.
@@ -22,7 +25,7 @@ The installer copies `Speaker Alert.app` to `~/Applications`, installs
 `io.github.meteorsliu.speaker-alert.plist` in `~/Library/LaunchAgents`, and starts the
 LaunchAgent immediately.
 
-CI artifacts are ad-hoc signed because the repository does not contain a
+Release DMGs are ad-hoc signed because the repository does not contain a
 Developer ID certificate or Apple notarization credentials. macOS may require
 manual approval before running a downloaded build.
 
