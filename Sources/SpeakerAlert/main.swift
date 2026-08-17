@@ -13,6 +13,7 @@ private final class SpeakerAlert {
     private var isMuted = false
     private var volume: Float32 = 0
     private var wasAudible = false
+    private var isMonitoringAudio = false
 
     private var muteAddress = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyMute,
@@ -24,10 +25,6 @@ private final class SpeakerAlert {
         mScope: kAudioDevicePropertyScopeOutput,
         mElement: kAudioObjectPropertyElementMain
     )
-
-    private lazy var outputControlListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-        self?.refreshOutputControls()
-    }
 
     func run() {
         var translateAddress = AudioObjectPropertyAddress(
@@ -53,36 +50,6 @@ private final class SpeakerAlert {
             exit(1)
         }
         speakerDevice = device
-
-        guard stateQueue.sync(execute: refreshOutputControls) else {
-            exit(1)
-        }
-        let muteListenerStatus = AudioObjectAddPropertyListenerBlock(
-            device,
-            &muteAddress,
-            stateQueue,
-            outputControlListener
-        )
-        guard muteListenerStatus == noErr else {
-            fputs("speaker-alert: cannot monitor speaker mute (OSStatus \(muteListenerStatus))\n", stderr)
-            exit(1)
-        }
-        let volumeListenerStatus = AudioObjectAddPropertyListenerBlock(
-            device,
-            &volumeAddress,
-            stateQueue,
-            outputControlListener
-        )
-        guard volumeListenerStatus == noErr else {
-            AudioObjectRemovePropertyListenerBlock(
-                device,
-                &muteAddress,
-                stateQueue,
-                outputControlListener
-            )
-            fputs("speaker-alert: cannot monitor speaker volume (OSStatus \(volumeListenerStatus))\n", stderr)
-            exit(1)
-        }
 
         let tapDescription = CATapDescription(
             excludingProcesses: [],
@@ -162,12 +129,67 @@ private final class SpeakerAlert {
             exit(1)
         }
 
-        let startStatus = AudioDeviceStart(aggregateDevice, ioProc)
-        guard startStatus == noErr else {
+        let monitoringDevice = aggregateDevice
+        let monitoringIOProc = ioProc
+        let outputControlListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.refreshOutputControls(
+                aggregateDevice: monitoringDevice,
+                ioProc: monitoringIOProc
+            )
+        }
+        let muteListenerStatus = AudioObjectAddPropertyListenerBlock(
+            device,
+            &muteAddress,
+            stateQueue,
+            outputControlListener
+        )
+        guard muteListenerStatus == noErr else {
             AudioDeviceDestroyIOProcID(aggregateDevice, ioProc)
             AudioHardwareDestroyAggregateDevice(aggregateDevice)
             AudioHardwareDestroyProcessTap(tap)
-            fputs("speaker-alert: cannot start audio callback (OSStatus \(startStatus))\n", stderr)
+            fputs("speaker-alert: cannot monitor speaker mute (OSStatus \(muteListenerStatus))\n", stderr)
+            exit(1)
+        }
+        let volumeListenerStatus = AudioObjectAddPropertyListenerBlock(
+            device,
+            &volumeAddress,
+            stateQueue,
+            outputControlListener
+        )
+        guard volumeListenerStatus == noErr else {
+            AudioObjectRemovePropertyListenerBlock(
+                device,
+                &muteAddress,
+                stateQueue,
+                outputControlListener
+            )
+            AudioDeviceDestroyIOProcID(aggregateDevice, ioProc)
+            AudioHardwareDestroyAggregateDevice(aggregateDevice)
+            AudioHardwareDestroyProcessTap(tap)
+            fputs("speaker-alert: cannot monitor speaker volume (OSStatus \(volumeListenerStatus))\n", stderr)
+            exit(1)
+        }
+        guard stateQueue.sync(execute: {
+            refreshOutputControls(
+                aggregateDevice: monitoringDevice,
+                ioProc: monitoringIOProc
+            )
+        }) else {
+            AudioObjectRemovePropertyListenerBlock(
+                device,
+                &volumeAddress,
+                stateQueue,
+                outputControlListener
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                device,
+                &muteAddress,
+                stateQueue,
+                outputControlListener
+            )
+            AudioDeviceDestroyIOProcID(aggregateDevice, ioProc)
+            AudioHardwareDestroyAggregateDevice(aggregateDevice)
+            AudioHardwareDestroyProcessTap(tap)
             exit(1)
         }
 
@@ -224,7 +246,10 @@ private final class SpeakerAlert {
     }
 
     @discardableResult
-    private func refreshOutputControls() -> Bool {
+    private func refreshOutputControls(
+        aggregateDevice: AudioDeviceID,
+        ioProc: AudioDeviceIOProcID
+    ) -> Bool {
         var mute: UInt32 = 0
         var muteSize = UInt32(MemoryLayout.size(ofValue: mute))
         var muteProperty = muteAddress
@@ -259,7 +284,44 @@ private final class SpeakerAlert {
 
         isMuted = mute != 0
         volume = currentVolume
+        let monitoringUpdated = updateAudioMonitoring(
+            aggregateDevice: aggregateDevice,
+            ioProc: ioProc
+        )
         updateAudibility()
+        return monitoringUpdated
+    }
+
+    private func updateAudioMonitoring(
+        aggregateDevice: AudioDeviceID,
+        ioProc: AudioDeviceIOProcID
+    ) -> Bool {
+        let shouldMonitorAudio = !isMuted && volume > 0
+        guard shouldMonitorAudio != isMonitoringAudio else {
+            return true
+        }
+
+        let status: OSStatus
+        if shouldMonitorAudio {
+            silentFrameCount = 0
+            tapHasSignal = false
+            hasSignal = false
+            status = AudioDeviceStart(aggregateDevice, ioProc)
+        } else {
+            status = AudioDeviceStop(aggregateDevice, ioProc)
+        }
+        guard status == noErr else {
+            let action = shouldMonitorAudio ? "start" : "stop"
+            fputs("speaker-alert: cannot \(action) audio monitoring (OSStatus \(status))\n", stderr)
+            return false
+        }
+
+        isMonitoringAudio = shouldMonitorAudio
+        if !shouldMonitorAudio {
+            silentFrameCount = 0
+            tapHasSignal = false
+            hasSignal = false
+        }
         return true
     }
 

@@ -7,6 +7,10 @@ zero volume. Raising the volume or unmuting during playback also triggers the
 notification. All-zero gaps shorter than 250 milliseconds do not reset the
 playback state.
 
+Audio monitoring is stopped while the built-in speaker is muted or set to zero
+volume. Core Audio property callbacks restart it when the speaker becomes
+audible again.
+
 It ignores headphones, USB audio devices, and other output devices. Audio
 buffers are inspected locally and are never copied, recorded, or saved.
 
